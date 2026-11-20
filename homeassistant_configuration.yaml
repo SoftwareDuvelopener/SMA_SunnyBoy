@@ -1,0 +1,82 @@
+# =============================================================================
+# Home Assistant configuration for SMA SB 5000TL-20 (Bluetooth)
+#
+# 1. Copy sma_total_yield.py to /config/sma/sma_total_yield.py on the Pi
+#    (e.g. with the "Samba share" or "File editor" add-on).
+# 2. Paste the blocks below into /config/configuration.yaml.
+#    - The command uses inverter 00:80:25:21:4E:40 via USB Bluetooth dongle
+#      00:15:83:3D:0A:57 (--adapter). Adjust if the hardware changes
+#      ("docker exec -it homeassistant bluetoothctl list" shows adapters).
+#    - If configuration.yaml already has a "command_line:" or "template:"
+#      section, add these entries to the existing section instead of
+#      creating a second one.
+# 3. Developer tools > YAML > Check configuration, then restart Home Assistant.
+# 4. Settings > Dashboards > Energy > Solar panels: add "SMA Total Yield".
+# =============================================================================
+
+command_line:
+  - sensor:
+      name: "SMA Total Yield"
+      unique_id: sma_sb5000tl_total_yield
+      command: "python3 /config/sma/sma_total_yield.py 00:80:25:21:4E:40 --adapter 00:15:83:3D:0A:57 --json --retries 2"
+      command_timeout: 90
+      # Polling is done by the automation below (daylight only), because the
+      # inverter switches off completely at night, Bluetooth included.
+      scan_interval: 86400
+      value_template: "{{ value_json.total_kwh }}"
+      unit_of_measurement: "kWh"
+      device_class: energy
+      state_class: total_increasing
+      json_attributes:
+        - today_kwh
+        - ac_power_w
+        - bt_signal_pct
+        - serial
+        - timestamp
+
+template:
+  - sensor:
+      - name: "SMA Today Yield"
+        unique_id: sma_sb5000tl_today_yield
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: "{{ state_attr('sensor.sma_total_yield', 'today_kwh') }}"
+        availability: "{{ state_attr('sensor.sma_total_yield', 'today_kwh') is number }}"
+
+      # Reports 0 W instead of "unavailable" when there is no reading (night,
+      # failed poll), so power flow cards keep working.
+      - name: "SMA AC Power"
+        unique_id: sma_sb5000tl_ac_power
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: "{{ state_attr('sensor.sma_total_yield', 'ac_power_w') | int(0) }}"
+
+      - name: "SMA Bluetooth Signal"
+        unique_id: sma_sb5000tl_bt_signal
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: mdi:bluetooth
+        state: "{{ state_attr('sensor.sma_total_yield', 'bt_signal_pct') }}"
+        availability: "{{ state_attr('sensor.sma_total_yield', 'bt_signal_pct') is number }}"
+
+# Poll every 5 minutes, only while the sun is up (avoids error log spam at
+# night). "automation sma:" can live next to an existing "automation:" line.
+automation sma:
+  - alias: "SMA inverter - poll during daylight"
+    id: sma_sb5000tl_poll
+    mode: single
+    triggers:
+      - trigger: time_pattern
+        minutes: "/5"
+    conditions:
+      - condition: sun
+        after: sunrise
+        after_offset: "-00:30:00"
+        before: sunset
+        before_offset: "00:30:00"
+    actions:
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.sma_total_yield
